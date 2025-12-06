@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+env:
+  GOBIN: ${{ github.workspace }}/.cache/go/bin
+  CARGO_HOME: ${{ github.workspace }}/.cache/cargo
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: ${{ !startsWith(github.event.head_commit.message, 'release(') && !startsWith(github.event.head_commit.message, 'release:') }}
+    uses: ./.github/workflows/verify.yaml
+    secrets: inherit
+
+  generate:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      next_version: ${{ steps.version.outputs.next_version }}
+      bump_type: ${{ steps.version.outputs.bump_type }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache - Go Tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GOBIN }}
+            ~/.cache/golangci-lint
+          key: ${{ runner.os }}-gotools-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gotools-
+      - name: Cache - Cargo Binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/bin
+            ${{ env.CARGO_HOME }}/git
+            ${{ env.CARGO_HOME }}/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('cliff.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Cache - Update PATH
+        run: |
+          echo "${{ env.GOBIN }}" >> "$GITHUB_PATH"
+          echo "${{ env.CARGO_HOME }}/bin" >> "$GITHUB_PATH"
+      - name: Dependencies
+        run: make deps
+      - name: Changelog
+        run: make changelog
+      - name: Manpage
+        run: make man
+      - name: Version
+        id: version
+        shell: bash
+        run: make version/github_actions
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            CHANGELOG.md
+            contrib/man/diffscribe.1
+
+  tag:
+    needs: generate
+    outputs:
+      release_version: ${{ steps.commit_release.outputs.release_version }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: ./
+      - name: Import GPG
+        id: import_gpg
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+      - name: Configure Git Signing
+        run: |
+          git config commit.gpgsign true
+          git config tag.gpgsign true
+          git config user.signingkey "${{ steps.import_gpg.outputs.keyid }}"
+          git config user.name "${{ vars.GIT_USER_NAME }}"
+          git config user.email "${{ vars.GIT_USER_EMAIL }}"
+      - name: Commit Release
+        id: commit_release
+        env:
+          RELEASE_VERSION: ${{ needs.generate.outputs.next_version }}
+          RELEASE_BUMP_TYPE: ${{ needs.generate.outputs.bump_type }}
+          RELEASE_GIT_SIGNINGKEY: ${{ steps.import_gpg.outputs.keyid }}
+        run: |
+          set -euo pipefail
+          make release/commit
+          if [ -f .out/release_committed ]; then
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+            echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+            rm -f .out/release_committed
+          else
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Tag Release
+        if: steps.commit_release.outputs.committed == 'true'
+        env:
+          RELEASE_VERSION: ${{ needs.generate.outputs.next_version }}
+        run: make release/tag
+      - name: Push Release
+        if: steps.commit_release.outputs.committed == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ needs.generate.outputs.next_version }}"
+          git push origin HEAD:main
+          git push origin "$version"
+
+  release:
+    needs: tag
+    if: ${{ needs.tag.outputs.release_version != '' }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.tag.outputs.release_version }}
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache - Go Tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GOBIN }}
+            ~/.cache/golangci-lint
+          key: ${{ runner.os }}-gotools-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gotools-
+      - name: Cache - Cargo Binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/bin
+            ${{ env.CARGO_HOME }}/git
+            ${{ env.CARGO_HOME }}/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('cliff.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Cache - Update PATH
+        run: |
+          echo "${{ env.GOBIN }}" >> "$GITHUB_PATH"
+          echo "${{ env.CARGO_HOME }}/bin" >> "$GITHUB_PATH"
+      - name: Dependencies
+        run: make deps
+      - name: Release
+        run: make release

@@ -1,0 +1,132 @@
+name: Verify
+
+on:
+  pull_request:
+    branches: [main]
+
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: true
+
+env:
+  GOBIN: ${{ github.workspace }}/.cache/go/bin
+  CARGO_HOME: ${{ github.workspace }}/.cache/cargo
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache - Go Tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GOBIN }}
+          key: ${{ runner.os }}-gotools-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gotools-
+      - name: Cache - Cargo Binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/bin
+            ${{ env.CARGO_HOME }}/git
+            ${{ env.CARGO_HOME }}/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('cliff.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Cache - Update PATH
+        run: |
+          echo "${{ env.GOBIN }}" >> "$GITHUB_PATH"
+          echo "${{ env.CARGO_HOME }}/bin" >> "$GITHUB_PATH"
+      - name: Dependencies
+        run: make deps
+      - name: Lint
+        run: make lint
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install shells
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Dependencies
+        run: go mod download
+      - name: Build
+        run: make build
+
+  bench:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Dependencies
+        run: go mod download
+      - name: Bench
+        run: make bench
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install shells
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
+      - name: Environment
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Dependencies
+        run: go mod download
+      - name: Test
+        run: make test && make test/completions
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-out
+          path: ./.out/coverage/coverage.out
+          if-no-files-found: error
+
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-out
+          path: ./.out/coverage
+      - name: Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          name: diffscribe
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./.out/coverage/coverage.out
+          fail_ci_if_error: true

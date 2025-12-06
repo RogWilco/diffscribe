@@ -1,17 +1,22 @@
+SHELL := /usr/bin/env bash
+
 BINARY := diffscribe
 SRC := $(shell find . -name '*.go')
 
 OUT_DIR := .out
 BUILD_BIN := $(OUT_DIR)/build/$(BINARY)
 
+export GOBIN ?= $(CURDIR)/.cache/go/bin
+export CARGO_HOME ?= $(CURDIR)/.cache/cargo
+
 GO ?= go
-GOLANGCI_LINT_BIN := $(shell $(GO) env GOPATH)/bin/golangci-lint
+GOLANGCI_LINT := $(GOBIN)/golangci-lint
 GOLANGCI_LINT_VERSION ?= $(shell $(GO) list -m -f '{{.Version}}' github.com/golangci/golangci-lint 2>/dev/null)
 GOLANGCI_LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint@$(if $(GOLANGCI_LINT_VERSION),$(GOLANGCI_LINT_VERSION),latest)
-GORELEASER_BIN := $(shell $(GO) env GOPATH)/bin/goreleaser
+GORELEASER := $(GOBIN)/goreleaser
 GORELEASER_VERSION ?= $(shell $(GO) list -m -f '{{.Version}}' github.com/goreleaser/goreleaser/v2 2>/dev/null)
 GORELEASER_PKG := github.com/goreleaser/goreleaser/v2@$(if $(GORELEASER_VERSION),$(GORELEASER_VERSION),latest)
-GIT_CLIFF_BIN ?= git-cliff
+GIT_CLIFF ?= git-cliff
 VERSION_PKG := github.com/rogwilco/diffscribe/internal/version
 GIT_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -19,13 +24,16 @@ EXACT_TAG := $(shell git describe --tags --exact-match 2>/dev/null)
 VERSION ?= $(if $(EXACT_TAG),$(EXACT_TAG),$(GIT_TAG)-dev.$(GIT_SHA))
 LDFLAGS := -s -w -X $(VERSION_PKG).version=$(VERSION)
 
+RELEASE_BUMP_TYPE ?= patch
+RELEASE_COMMIT_FLAG := $(OUT_DIR)/release_committed
+
 PREFIX ?= /usr/local/bin
 PREFIX_ROOT := $(patsubst %/,%,$(dir $(PREFIX)))
 INSTALL_BIN := $(PREFIX)/$(BINARY)
 MANPREFIX ?= $(PREFIX_ROOT)/share/man
 MANDIR := $(MANPREFIX)/man1
 MANPAGE := diffscribe.1
-MANPAGE_SRC := $(BUILD_BIN).1
+MANPAGE_SRC := contrib/man/$(MANPAGE)
 INSTALL_MAN := $(MANDIR)/$(MANPAGE)
 
 # Completion install locations
@@ -68,7 +76,7 @@ OMZ_PLUGIN_LIB := $(OMZ_PLUGIN_DIR)/$(ZSH_LIB_NAME)
 		install/man man link uninstall uninstall/all uninstall/binary uninstall/completions/zsh \
 		uninstall/completions/bash uninstall/completions/fish uninstall/completions/oh-my-zsh \
 		uninstall/man \
-		deps changelog test test/completions test/completions/bash test/completions/zsh \
+		deps changelog releasenotes version version/bump_type version/github_actions release/commit release/tag test test/completions test/completions/bash test/completions/zsh \
 		test/completions/fish bench lint format help vars _print-var
 
 ## Build all artifacts
@@ -83,19 +91,31 @@ build: $(SRC)
 
 dist:
 	@echo "📦 Building release artifacts via GoReleaser..."
-	@$(GORELEASER_BIN) release --snapshot --clean
+	@notes="$$($(MAKE) --no-print-directory releasenotes)"; \
+	GIT_CLIFF_RELEASE_NOTES="$$notes" \
+		$(GORELEASER) release --snapshot --clean
 
 release:
 	@echo "📦 Building release artifacts via GoReleaser..."
-	@$(GORELEASER_BIN) release --clean
+	@notes="$$($(MAKE) --no-print-directory releasenotes)"; \
+	GIT_CLIFF_RELEASE_NOTES="$$notes" \
+		$(GORELEASER) release --clean
 
 ## Install Go module and tooling dependencies
 deps:
-	@echo "⬇️ Installing golangci-lint ($(if $(GOLANGCI_LINT_VERSION),$(GOLANGCI_LINT_VERSION),latest))..."
-	@$(GO) install $(GOLANGCI_LINT_PKG)
-	@echo "⬇️ Installing goreleaser ($(if $(GORELEASER_VERSION),$(GORELEASER_VERSION),latest))..."
-	@$(GO) install $(GORELEASER_PKG)
-	@if ! command -v $(GIT_CLIFF_BIN) >/dev/null 2>&1; then \
+	@if ! command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
+		echo "⬇️ Installing golangci-lint ($(if $(GOLANGCI_LINT_VERSION),$(GOLANGCI_LINT_VERSION),latest))..."; \
+		$(GO) install $(GOLANGCI_LINT_PKG); \
+	else \
+		echo "ℹ️ golangci-lint already installed ($$(command -v $(GOLANGCI_LINT)))"; \
+	fi
+	@if ! command -v $(GORELEASER) >/dev/null 2>&1; then \
+		echo "⬇️ Installing goreleaser ($(if $(GORELEASER_VERSION),$(GORELEASER_VERSION),latest))..."; \
+		$(GO) install $(GORELEASER_PKG); \
+	else \
+		echo "ℹ️ goreleaser already installed ($$(command -v $(GORELEASER)))"; \
+	fi
+	@if ! command -v $(GIT_CLIFF) >/dev/null 2>&1; then \
 		echo "⬇️ Installing git-cliff (requires cargo)..."; \
 		if command -v cargo >/dev/null 2>&1; then \
 			cargo install git-cliff >/dev/null 2>&1 || { echo "⚠️ Failed to install git-cliff via cargo"; exit 1; }; \
@@ -103,7 +123,7 @@ deps:
 			echo "⚠️ cargo not found — install git-cliff manually from https://github.com/orhun/git-cliff"; \
 		fi; \
 	else \
-		echo "ℹ️ git-cliff already installed ($$(command -v $(GIT_CLIFF_BIN)))"; \
+		echo "ℹ️ git-cliff already installed ($$(command -v $(GIT_CLIFF)))"; \
 	fi
 	@echo "📦 Downloading Go module dependencies..."
 	@$(GO) mod download
@@ -114,12 +134,101 @@ man:
 
 ## Generate CHANGELOG.md from conventional commits
 changelog:
-	@if ! command -v $(GIT_CLIFF_BIN) >/dev/null 2>&1; then \
+	@if ! command -v $(GIT_CLIFF) >/dev/null 2>&1; then \
 		echo "❌ git-cliff not found. Run 'make deps' or install git-cliff manually."; \
 		exit 1; \
 	fi
 	@echo "📝 Generating CHANGELOG.md via git-cliff..."
-	@$(GIT_CLIFF_BIN) --config cliff.toml --output CHANGELOG.md
+	@$(GIT_CLIFF) --config cliff.toml --output CHANGELOG.md
+
+## Print the release notes snippet used by GoReleaser
+releasenotes:
+	@if [ ! -x "$(CURDIR)/scripts/releasenotes.sh" ]; then \
+		echo "❌ Missing $(CURDIR)/scripts/releasenotes.sh" >&2; \
+		exit 1; \
+	fi
+	@"$(CURDIR)/scripts/releasenotes.sh"
+
+## Print the next semantic version derived from conventional commits
+version:
+	@if ! command -v $(GIT_CLIFF) >/dev/null 2>&1; then \
+		echo "❌ git-cliff not found. Run 'make deps' or install git-cliff manually." >&2; \
+		exit 1; \
+	fi
+	@next_version=$$($(GIT_CLIFF) --config cliff.toml --bumped-version 2>/dev/null); \
+	if [ -z "$$next_version" ]; then \
+		echo "❌ Unable to determine next version" >&2; \
+		exit 1; \
+	fi; \
+	echo "$$next_version"
+
+## Determine whether the upcoming version is a major/minor/patch bump
+version/bump_type:
+	@current=$$($(MAKE) --no-print-directory version); \
+	prev_tag=$$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo v0.0.0); \
+	clean_prev=$${prev_tag#v}; \
+	clean_curr=$${current#v}; \
+	prev_major=$$(printf '%s' "$$clean_prev" | cut -d. -f1); \
+	prev_minor=$$(printf '%s' "$$clean_prev" | cut -d. -f2); \
+	prev_patch=$$(printf '%s' "$$clean_prev" | cut -d. -f3); \
+	curr_major=$$(printf '%s' "$$clean_curr" | cut -d. -f1); \
+	curr_minor=$$(printf '%s' "$$clean_curr" | cut -d. -f2); \
+	curr_patch=$$(printf '%s' "$$clean_curr" | cut -d. -f3); \
+	prev_major=$${prev_major:-0}; prev_minor=$${prev_minor:-0}; prev_patch=$${prev_patch:-0}; \
+	curr_major=$${curr_major:-0}; curr_minor=$${curr_minor:-0}; curr_patch=$${curr_patch:-0}; \
+	bump=patch; \
+	if [ "$$curr_major" != "$$prev_major" ]; then \
+		bump=major; \
+	elif [ "$$curr_minor" != "$$prev_minor" ]; then \
+		bump=minor; \
+	elif [ "$$curr_patch" != "$$prev_patch" ]; then \
+		bump=patch; \
+	fi; \
+	echo "$$bump"
+
+version/github_actions:
+	@output_file="$$GITHUB_OUTPUT"; \
+	if [ -z "$$output_file" ]; then \
+		echo "❌ GITHUB_OUTPUT is not set" >&2; \
+		exit 1; \
+	fi; \
+	set -euo pipefail; \
+	version=$$($(MAKE) --no-print-directory version); \
+	bump=$$($(MAKE) --no-print-directory version/bump_type); \
+	echo "next_version=$$version" >> "$$output_file"; \
+	echo "bump_type=$$bump" >> "$$output_file"
+
+## Commit release artifacts (CHANGELOG, manpage, etc.)
+release/commit:
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "❌ RELEASE_VERSION is required" >&2; \
+		exit 1; \
+	fi
+	@if [ -z "$(RELEASE_BUMP_TYPE)" ]; then \
+		echo "❌ RELEASE_BUMP_TYPE is required" >&2; \
+		exit 1; \
+	fi
+	@mkdir -p $(dir $(RELEASE_COMMIT_FLAG))
+	@rm -f $(RELEASE_COMMIT_FLAG)
+	git add -A; \
+	if git diff --cached --quiet; then \
+		echo "ℹ️ No release changes to commit"; \
+	else \
+		git commit -m "release($(RELEASE_BUMP_TYPE)): $(RELEASE_VERSION)"; \
+		echo "true" > $(RELEASE_COMMIT_FLAG); \
+	fi
+
+## Tag the release
+release/tag:
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "❌ RELEASE_VERSION is required" >&2; \
+		exit 1; \
+	fi
+	@if git rev-parse "$(RELEASE_VERSION)" >/dev/null 2>&1; then \
+		echo "ℹ️ Tag $(RELEASE_VERSION) already exists"; \
+		git tag -d "$(RELEASE_VERSION)" >/dev/null 2>&1 || true; \
+	fi
+	@git tag -a "$(RELEASE_VERSION)" -m "Release $(RELEASE_VERSION)"
 
 ## Remove all build artifacts
 clean:
@@ -160,7 +269,7 @@ bench:
 ## Run golangci-lint
 lint:
 	@echo "🧼 Running golangci-lint..."
-	@$(GOLANGCI_LINT_BIN) run
+	@$(GOLANGCI_LINT) run
 
 ## Prepare the codebase for a new commit
 prep: format

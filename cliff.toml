@@ -2,12 +2,7 @@
 # https://git-cliff.org/docs/configuration
 
 [bump]
-# features_always_bump_minor = false
-# breaking_always_bump_major = false
 initial_tag = "v0.1.0"
-# custom_major_increment_regex = ""
-# custom_minor_increment_regex = ""
-# bump_type = "patch"
 
 [changelog]
 header = """
@@ -77,18 +72,13 @@ body = """
   {% endif -%}
 {% endfor -%}
 """
-# footer = ""
 trim = true
-# render_always = true
-# postprocessors = []
-# output = "CHANGELOG.md"
 
 [git]
-# conventional_commits = true
-# filter_unconventional = true
-# require_conventional = true # TODO: enable this
-# split_commits = false
-# commit_preprocessors = []
+conventional_commits = true
+filter_unconventional = true
+require_conventional = true
+split_commits = false
 commit_parsers = [
   { message = "^feat", group = "New Features" },
   { message = "^refactor", group = "Improvements" },
@@ -98,19 +88,3 @@ commit_parsers = [
 protect_breaking_commits = true
 filter_commits = true
 tag_pattern = "^v[0-9].*"
-# skip_tags = ""
-# ignore_tags = ""
-# count_tags = ""
-# topo_order = false
-# topo_order_commits = true
-# sort_commits = "oldest"
-# link_parsers = []
-# limit_commits = 0
-# recurse_submodules = false
-# include_paths = []
-# exclude_paths = []
-# use_branch_tags = false
-
-# [remote.github]
-# owner = "nickawilliams"
-# repo = "diffscribe"

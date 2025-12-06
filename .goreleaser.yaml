@@ -71,14 +71,16 @@ source:
   name_template: "{{ .ProjectName }}_{{- .Version }}_source"
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
+  disable: true # release notes handled via git-cliff (see release.header)
 
 release:
-  draft: true
+  draft: false
   prerelease: auto
   make_latest: true
   mode: replace
+  header: |
+    {{- if .Env.GIT_CLIFF_RELEASE_NOTES }}
+    {{ .Env.GIT_CLIFF_RELEASE_NOTES }}
+    {{- else -}}
+    WARNING: git-cliff release notes missing -- rerun via `make release`.
+    {{- end }}
