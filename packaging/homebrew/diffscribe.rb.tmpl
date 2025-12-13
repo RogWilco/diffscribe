@@ -1,0 +1,98 @@
+# typed: false
+# This file is rendered via packaging/homebrew/render.sh. Do not edit manually.
+
+class Diffscribe < Formula
+  desc "${FORMULA_DESC}"
+  homepage "${HOMEPAGE}"
+  license "${LICENSE}"
+  version "${VERSION}"
+
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
+  on_macos do
+    on_arm do
+      url "${ARM64_URL}"
+      sha256 "${ARM64_SHA}"
+    end
+
+    on_intel do
+      url "${AMD64_URL}"
+      sha256 "${AMD64_SHA}"
+    end
+  end
+
+  resource "source" do
+    url "${SOURCE_URL}"
+    sha256 "${SOURCE_SHA}"
+  end
+
+  def install
+    if build_from_source?
+      odie "The Go toolchain (go 1.21+) is required to build from source." unless Utils.which("go")
+      ohai "Building #{binary_name} #{version} from source tarball"
+      resource("source").stage do
+        ldflags = %W[
+          -s -w
+          -X github.com/rogwilco/diffscribe/internal/version.version=#{version}
+        ]
+        system "go", "build", "-trimpath", "-ldflags", ldflags.join(" "), "-o", buildpath/binary_name, "./"
+        bin.install buildpath/binary_name
+        install_shared_assets(Pathname.pwd)
+      end
+    else
+      install_prebuilt_payload
+    end
+  end
+
+  def build_from_source?
+    ARGV.include?("--build-from-source")
+  end
+
+  def install_prebuilt_payload
+    payload_root = buildpath.children.find(&:directory?)
+    odie "Unable to locate the extracted payload" unless payload_root && payload_root.directory?
+
+    bin.install payload_root/binary_name
+    install_shared_assets(payload_root)
+  end
+
+  def install_shared_assets(root)
+    completion_root = if (root/"completions").directory?
+      root/"completions"
+    else
+      root/"contrib"/"completions"
+    end
+
+    bash_completion.install completion_root/"bash"/"#{binary_name}.bash" => binary_name
+    zsh_completion.install completion_root/"zsh"/"diffscribe.zsh" => "_#{binary_name}"
+    fish_completion.install completion_root/"fish"/"#{binary_name}.fish"
+
+    manpage = if (root/"#{binary_name}.1").exist?
+      root/"#{binary_name}.1"
+    else
+      root/"contrib"/"man"/"#{binary_name}.1"
+    end
+    man1.install manpage
+  end
+
+  def caveats
+    return unless build_from_source?
+
+    <<~EOS
+      `brew install #{full_name}` uses the published macOS binaries.
+      You passed --build-from-source, so Homebrew rebuilt #{binary_name} locally.
+      Ensure Go 1.21+ stays available if you repeat that workflow.
+    EOS
+  end
+
+  def binary_name
+    "${BINARY_NAME}"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/#{binary_name} --version")
+  end
+end
